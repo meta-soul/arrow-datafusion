@@ -70,7 +70,6 @@ use datafusion_sql::{ResolvedTableReference, TableReference};
 use crate::physical_optimizer::coalesce_batches::CoalesceBatches;
 use crate::physical_optimizer::repartition::Repartition;
 
-use crate::config::ConfigOptions;
 use crate::execution::{runtime_env::RuntimeEnv, FunctionRegistry};
 use crate::physical_optimizer::dist_enforcement::EnforceDistribution;
 use crate::physical_plan::file_format::{plan_to_csv, plan_to_json, plan_to_parquet};
@@ -101,6 +100,7 @@ use crate::physical_optimizer::sort_enforcement::EnforceSorting;
 use datafusion_optimizer::OptimizerConfig;
 use datafusion_sql::planner::object_name_to_table_reference;
 use uuid::Uuid;
+use datafusion_common::config::ConfigOptions;
 
 use super::options::{
     AvroReadOptions, CsvReadOptions, NdJsonReadOptions, ParquetReadOptions, ReadOptions,
@@ -1173,7 +1173,17 @@ impl SessionConfig {
         self
     }
 
+    /// Set parquet aysnc read prefetch size of row groups
+    pub fn with_prefetch(mut self, n: usize) -> Self {
+        // batch size must be greater than zero
+        assert!(n > 0);
+        self.options.execution.parquet.prefetch_size = n;
+        self
+    }
+
     /// Customize [`OPT_TARGET_PARTITIONS`]
+
+    /// Customize target_partitions
     pub fn with_target_partitions(mut self, n: usize) -> Self {
         // partition count must be greater than zero
         assert!(n > 0);
@@ -1277,6 +1287,11 @@ impl SessionConfig {
     /// Get the currently configured batch size
     pub fn batch_size(&self) -> usize {
         self.options.execution.batch_size
+    }
+
+    /// Get parquet async read prefetch size
+    pub fn prefetch(&self) -> usize {
+        self.options.execution.parquet.prefetch_size
     }
 
     /// Convert configuration options to name-value pairs with values
