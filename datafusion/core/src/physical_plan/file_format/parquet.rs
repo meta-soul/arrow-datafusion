@@ -302,6 +302,11 @@ impl ExecutionPlan for ParquetExec {
                     })
             })?;
 
+        let mut prefetch = ctx.session_config().prefetch();
+        if prefetch == 0 {
+            prefetch = 2;
+        }
+
         let opener = ParquetOpener {
             partition_index,
             projection: Arc::from(projection),
@@ -312,6 +317,7 @@ impl ExecutionPlan for ParquetExec {
             metrics: self.metrics.clone(),
             parquet_file_reader_factory,
             scan_options: self.scan_options.clone(),
+            prefetch,
         };
 
         let stream = FileStream::new(
@@ -374,6 +380,7 @@ struct ParquetOpener {
     metrics: ExecutionPlanMetricsSet,
     parquet_file_reader_factory: Arc<dyn ParquetFileReaderFactory>,
     scan_options: ParquetScanOptions,
+    prefetch: usize,
 }
 
 impl FileOpener for ParquetOpener {
@@ -406,6 +413,7 @@ impl FileOpener for ParquetOpener {
         let reorder_predicates = self.scan_options.reorder_predicates;
         let pushdown_filters = self.scan_options.pushdown_filters;
         let enable_page_index = self.scan_options.enable_page_index;
+        let prefetch = self.prefetch;
 
         Ok(Box::pin(async move {
             let options = ArrowReaderOptions::new().with_page_index(enable_page_index);
@@ -443,6 +451,7 @@ impl FileOpener for ParquetOpener {
                 .with_projection(mask)
                 .with_batch_size(batch_size)
                 .with_row_groups(row_groups)
+                .with_prefetch(prefetch)
                 .build()?;
 
             let adapted = stream

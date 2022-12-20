@@ -35,6 +35,7 @@ pub const OPT_EXPLAIN_PHYSICAL_PLAN_ONLY: &str = "datafusion.explain.physical_pl
 
 /// Configuration option "datafusion.execution.batch_size"
 pub const OPT_BATCH_SIZE: &str = "datafusion.execution.batch_size";
+pub const OPT_PARQUET_PREFETCH_ROWGROUPS: &str = "datafusion.execution.parquet.prefetch";
 
 /// Configuration option "datafusion.execution.coalesce_batches"
 pub const OPT_COALESCE_BATCHES: &str = "datafusion.execution.coalesce_batches";

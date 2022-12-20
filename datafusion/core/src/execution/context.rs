@@ -76,10 +76,7 @@ use crate::physical_optimizer::coalesce_batches::CoalesceBatches;
 use crate::physical_optimizer::merge_exec::AddCoalescePartitionsExec;
 use crate::physical_optimizer::repartition::Repartition;
 
-use crate::config::{
-    ConfigOptions, OPT_BATCH_SIZE, OPT_COALESCE_BATCHES, OPT_COALESCE_TARGET_BATCH_SIZE,
-    OPT_FILTER_NULL_JOIN_KEYS, OPT_OPTIMIZER_SKIP_FAILED_RULES,
-};
+use crate::config::{ConfigOptions, OPT_BATCH_SIZE, OPT_COALESCE_BATCHES, OPT_COALESCE_TARGET_BATCH_SIZE, OPT_FILTER_NULL_JOIN_KEYS, OPT_OPTIMIZER_SKIP_FAILED_RULES, OPT_PARQUET_PREFETCH_ROWGROUPS};
 use crate::datasource::datasource::TableProviderFactory;
 use crate::execution::runtime_env::RuntimeEnv;
 use crate::logical_plan::plan::Explain;
@@ -1208,6 +1205,12 @@ impl SessionConfig {
         self.set_u64(OPT_BATCH_SIZE, n.try_into().unwrap())
     }
 
+    pub fn with_prefetch(self, n: usize) -> Self {
+        // batch size must be greater than zero
+        assert!(n > 0);
+        self.set_u64(OPT_PARQUET_PREFETCH_ROWGROUPS, n.try_into().unwrap())
+    }
+
     /// Customize target_partitions
     pub fn with_target_partitions(mut self, n: usize) -> Self {
         // partition count must be greater than zero
@@ -1268,6 +1271,15 @@ impl SessionConfig {
         self.config_options
             .read()
             .get_u64(OPT_BATCH_SIZE)
+            .unwrap_or_default()
+            .try_into()
+            .unwrap()
+    }
+
+    pub fn prefetch(&self) -> usize {
+        self.config_options
+            .read()
+            .get_u64(OPT_PARQUET_PREFETCH_ROWGROUPS)
             .unwrap_or_default()
             .try_into()
             .unwrap()
