@@ -695,10 +695,10 @@ impl SessionContext {
 
     pub async fn read_multi_parquet_sorted_by_primary_key(
         &self,
-        table_paths: vec<impl AsRef<str>>,
+        table_paths: Vec<impl AsRef<str>>,
         options: ParquetReadOptions<'_>,
     ) -> Result<Arc<DataFrame>> {
-        let table_path = ListingTableUrl::parse(table_paths[0])?;
+        let table_path = ListingTableUrl::parse(table_paths[0].as_ref())?;
         let target_partitions = self.copied_config().target_partitions;
 
         let listing_options = options.to_listing_options(target_partitions);
