@@ -185,7 +185,7 @@ impl<F: FileOpener> FileStream<F> {
             &config.table_partition_cols,
         );
 
-        let files = config.file_groups[partition].clone();
+        let files = dbg!(config.file_groups[partition].clone());
 
         let object_store = context
             .runtime_env()
