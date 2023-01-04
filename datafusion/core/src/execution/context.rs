@@ -693,6 +693,29 @@ impl SessionContext {
         self.read_table(Arc::new(provider))
     }
 
+    pub async fn read_multi_parquet_sorted_by_primary_key(
+        &self,
+        table_paths: vec<impl AsRef<str>>,
+        options: ParquetReadOptions<'_>,
+    ) -> Result<Arc<DataFrame>> {
+        let table_path = ListingTableUrl::parse(table_paths[0])?;
+        let target_partitions = self.copied_config().target_partitions;
+
+        let listing_options = options.to_listing_options(target_partitions);
+
+        // with parquet we resolve the schema in all cases
+        let resolved_schema = listing_options
+            .infer_schema(&self.state(), &table_path)
+            .await?;
+
+        let config = ListingTableConfig::new(table_path)
+            .with_listing_options(listing_options)
+            .with_schema(resolved_schema);
+
+        let provider = ListingTable::try_new(config)?;
+        self.read_table(Arc::new(provider))
+    }
+
     /// Creates a [`DataFrame`] for reading a custom [`TableProvider`].
     pub fn read_table(&self, provider: Arc<dyn TableProvider>) -> Result<Arc<DataFrame>> {
         Ok(Arc::new(DataFrame::new(
