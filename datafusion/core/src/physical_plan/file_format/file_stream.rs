@@ -336,7 +336,7 @@ pub struct MergeFileStream<F: FileOpener> {
     /// the store from which to source the files.
     object_store: Arc<dyn ObjectStore>,
     /// The stream state
-    state: FileStreamState,
+    state: MergeFileStreamState,
     /// File stream specific metrics
     file_stream_metrics: FileStreamMetrics,
     /// runtime baseline metrics
@@ -372,7 +372,7 @@ impl<F: FileOpener> MergeFileStream<F> {
             file_reader,
             pc_projector,
             object_store,
-            state: FileStreamState::Idle,
+            state: MergeFileStreamState::Idle,
             file_stream_metrics: FileStreamMetrics::new(&metrics, partition),
             baseline_metrics: BaselineMetrics::new(&metrics, partition),
         })
@@ -383,7 +383,7 @@ impl<F: FileOpener> MergeFileStream<F> {
     ) -> Poll<Option<ArrowResult<RecordBatch>>> {
         loop {
             match &mut self.state {
-                FileStreamState::Idle => {
+                MergeFileStreamState::Idle => {
                     let part_file = match self.file_iter.pop_front() {
                         Some(file) => file,
                         None => return Poll::Ready(None),
@@ -399,35 +399,35 @@ impl<F: FileOpener> MergeFileStream<F> {
 
                     match self.file_reader.open(self.object_store.clone(), file_meta) {
                         Ok(future) => {
-                            self.state = FileStreamState::Open {
+                            self.state = MergeFileStreamState::Open {
                                 future,
                                 partition_values: part_file.partition_values,
                             }
                         }
                         Err(e) => {
-                            self.state = FileStreamState::Error;
+                            self.state = MergeFileStreamState::Error;
                             return Poll::Ready(Some(Err(e.into())));
                         }
                     }
                 }
-                FileStreamState::Open {
+                MergeFileStreamState::Open {
                     future,
                     partition_values,
                 } => match ready!(future.poll_unpin(cx)) {
                     Ok(reader) => {
                         self.file_stream_metrics.time_opening.stop();
                         self.file_stream_metrics.time_scanning.start();
-                        self.state = FileStreamState::Scan {
+                        self.state = MergeFileStreamState::Scan {
                             partition_values: std::mem::take(partition_values),
                             reader,
                         };
                     }
                     Err(e) => {
-                        self.state = FileStreamState::Error;
+                        self.state = MergeFileStreamState::Error;
                         return Poll::Ready(Some(Err(e.into())));
                     }
                 },
-                FileStreamState::Scan {
+                MergeFileStreamState::Scan {
                     reader,
                     partition_values,
                 } => match ready!(reader.poll_next_unpin(cx)) {
@@ -442,7 +442,7 @@ impl<F: FileOpener> MergeFileStream<F> {
                                         batch
                                     } else {
                                         let batch = batch.slice(0, *remain);
-                                        self.state = FileStreamState::Limit;
+                                        self.state = MergeFileStreamState::Limit;
                                         *remain = 0;
                                         batch
                                     }
@@ -451,17 +451,17 @@ impl<F: FileOpener> MergeFileStream<F> {
                             });
 
                         if result.is_err() {
-                            self.state = FileStreamState::Error
+                            self.state = MergeFileStreamState::Error
                         }
 
                         return Poll::Ready(Some(result));
                     }
                     None => {
                         self.file_stream_metrics.time_scanning.stop();
-                        self.state = FileStreamState::Idle;
+                        self.state = MergeFileStreamState::Idle;
                     }
                 },
-                FileStreamState::Error | FileStreamState::Limit => {
+                MergeFileStreamState::Error | MergeFileStreamState::Limit => {
                     return Poll::Ready(None)
                 }
             }
@@ -487,6 +487,31 @@ impl<F: FileOpener> RecordBatchStream for MergeFileStream<F> {
     fn schema(&self) -> SchemaRef {
         self.projected_schema.clone()
     }
+}
+
+enum MergeFileStreamState {
+    /// The idle state, no file is currently being read
+    Idle,
+    /// Currently performing asynchronous IO to obtain a stream of RecordBatch
+    /// for a given parquet file
+    Open {
+        /// A [`FileOpenFuture`] returned by [`FormatReader::open`]
+        future: FileOpenFuture,
+        /// The partition values for this file
+        partition_values: Vec<ScalarValue>,
+    },
+    /// Scanning the [`BoxStream`] returned by the completion of a [`FileOpenFuture`]
+    /// returned by [`FormatReader::open`]
+    Scan {
+        /// Partitioning column values for the current batch_iter
+        partition_values: Vec<ScalarValue>,
+        /// The reader instance
+        reader: BoxStream<'static, ArrowResult<RecordBatch>>,
+    },
+    /// Encountered an error
+    Error,
+    /// Reached the row limit
+    Limit,
 }
 
 #[cfg(test)]
