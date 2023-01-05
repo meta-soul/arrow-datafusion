@@ -26,8 +26,9 @@ use std::{any::Any, convert::TryInto};
 
 use crate::datasource::file_format::parquet::fetch_parquet_metadata;
 use crate::datasource::listing::FileRange;
+use crate::physical_plan::RecordBatchStream;
 use crate::physical_plan::file_format::file_stream::{
-    FileOpenFuture, FileOpener, FileStream,
+    FileOpenFuture, FileOpener, FileStream, MergeFileStream
 };
 use crate::physical_plan::file_format::row_filter::build_row_filter;
 use crate::physical_plan::file_format::FileMeta;
@@ -84,6 +85,8 @@ pub struct ParquetScanOptions {
     /// via `RowSelector` and `RowFilter` by
     /// eliminating unnecessary IO and decoding
     enable_page_index: bool,
+
+    merge_on_read: bool,
 }
 
 impl ParquetScanOptions {
@@ -320,15 +323,25 @@ impl ExecutionPlan for ParquetExec {
             prefetch,
         };
 
-        let stream = FileStream::new(
-            &self.base_config,
-            partition_index,
-            ctx,
-            opener,
-            self.metrics.clone(),
-        )?;
+        let stream:SendableRecordBatchStream = if self.scan_options.merge_on_read {
+            Box::pin( MergeFileStream::new(
+                &self.base_config,
+                partition_index,
+                ctx,
+                opener,
+                self.metrics.clone(),
+            )?)
+        } else {
+            Box::pin( FileStream::new(
+                &self.base_config,
+                partition_index,
+                ctx,
+                opener,
+                self.metrics.clone(),
+            )?)
+        };
 
-        Ok(Box::pin(stream))
+        Ok(stream)
     }
 
     fn fmt_as(

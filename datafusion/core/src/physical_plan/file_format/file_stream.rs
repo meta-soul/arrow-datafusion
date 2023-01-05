@@ -316,6 +316,179 @@ impl<F: FileOpener> RecordBatchStream for FileStream<F> {
     }
 }
 
+
+/// A stream that iterates record batch by record batch, file over file.
+pub struct MergeFileStream<F: FileOpener> {
+    /// An iterator over input files.
+    file_iter: VecDeque<PartitionedFile>,
+    /// The stream schema (file schema including partition columns and after
+    /// projection).
+    projected_schema: SchemaRef,
+    /// The remaining number of records to parse, None if no limit
+    remain: Option<usize>,
+    /// A closure that takes a reader and an optional remaining number of lines
+    /// (before reaching the limit) and returns a batch iterator. If the file reader
+    /// is not capable of limiting the number of records in the last batch, the file
+    /// stream will take care of truncating it.
+    file_reader: F,
+    /// The partition column projector
+    pc_projector: PartitionColumnProjector,
+    /// the store from which to source the files.
+    object_store: Arc<dyn ObjectStore>,
+    /// The stream state
+    state: FileStreamState,
+    /// File stream specific metrics
+    file_stream_metrics: FileStreamMetrics,
+    /// runtime baseline metrics
+    baseline_metrics: BaselineMetrics,
+}
+
+// todo!: clone from FileStream temporally
+impl<F: FileOpener> MergeFileStream<F> {
+    /// Create a new `FileStream` using the give `FileOpener` to scan underlying files
+    pub fn new(
+        config: &FileScanConfig,
+        partition: usize,
+        context: Arc<TaskContext>,
+        file_reader: F,
+        metrics: ExecutionPlanMetricsSet,
+    ) -> Result<Self> {
+        let (projected_schema, _) = config.project();
+        let pc_projector = PartitionColumnProjector::new(
+            projected_schema.clone(),
+            &config.table_partition_cols,
+        );
+
+        let files = dbg!(config.file_groups[partition].clone());
+
+        let object_store = context
+            .runtime_env()
+            .object_store(&config.object_store_url)?;
+
+        Ok(Self {
+            file_iter: files.into(),
+            projected_schema,
+            remain: config.limit,
+            file_reader,
+            pc_projector,
+            object_store,
+            state: FileStreamState::Idle,
+            file_stream_metrics: FileStreamMetrics::new(&metrics, partition),
+            baseline_metrics: BaselineMetrics::new(&metrics, partition),
+        })
+    }
+    fn poll_inner(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<ArrowResult<RecordBatch>>> {
+        loop {
+            match &mut self.state {
+                FileStreamState::Idle => {
+                    let part_file = match self.file_iter.pop_front() {
+                        Some(file) => file,
+                        None => return Poll::Ready(None),
+                    };
+
+                    let file_meta = FileMeta {
+                        object_meta: part_file.object_meta,
+                        range: part_file.range,
+                        extensions: part_file.extensions,
+                    };
+
+                    self.file_stream_metrics.time_opening.start();
+
+                    match self.file_reader.open(self.object_store.clone(), file_meta) {
+                        Ok(future) => {
+                            self.state = FileStreamState::Open {
+                                future,
+                                partition_values: part_file.partition_values,
+                            }
+                        }
+                        Err(e) => {
+                            self.state = FileStreamState::Error;
+                            return Poll::Ready(Some(Err(e.into())));
+                        }
+                    }
+                }
+                FileStreamState::Open {
+                    future,
+                    partition_values,
+                } => match ready!(future.poll_unpin(cx)) {
+                    Ok(reader) => {
+                        self.file_stream_metrics.time_opening.stop();
+                        self.file_stream_metrics.time_scanning.start();
+                        self.state = FileStreamState::Scan {
+                            partition_values: std::mem::take(partition_values),
+                            reader,
+                        };
+                    }
+                    Err(e) => {
+                        self.state = FileStreamState::Error;
+                        return Poll::Ready(Some(Err(e.into())));
+                    }
+                },
+                FileStreamState::Scan {
+                    reader,
+                    partition_values,
+                } => match ready!(reader.poll_next_unpin(cx)) {
+                    Some(result) => {
+                        self.file_stream_metrics.time_scanning.stop();
+                        let result = result
+                            .and_then(|b| self.pc_projector.project(b, partition_values))
+                            .map(|batch| match &mut self.remain {
+                                Some(remain) => {
+                                    if *remain > batch.num_rows() {
+                                        *remain -= batch.num_rows();
+                                        batch
+                                    } else {
+                                        let batch = batch.slice(0, *remain);
+                                        self.state = FileStreamState::Limit;
+                                        *remain = 0;
+                                        batch
+                                    }
+                                }
+                                None => batch,
+                            });
+
+                        if result.is_err() {
+                            self.state = FileStreamState::Error
+                        }
+
+                        return Poll::Ready(Some(result));
+                    }
+                    None => {
+                        self.file_stream_metrics.time_scanning.stop();
+                        self.state = FileStreamState::Idle;
+                    }
+                },
+                FileStreamState::Error | FileStreamState::Limit => {
+                    return Poll::Ready(None)
+                }
+            }
+        }
+    }
+}
+
+impl<F: FileOpener> Stream for MergeFileStream<F> {
+    type Item = ArrowResult<RecordBatch>;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        self.file_stream_metrics.time_processing.start();
+        let result = self.poll_inner(cx);
+        self.file_stream_metrics.time_processing.stop();
+        self.baseline_metrics.record_poll(result)
+    }
+}
+
+impl<F: FileOpener> RecordBatchStream for MergeFileStream<F> {
+    fn schema(&self) -> SchemaRef {
+        self.projected_schema.clone()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use futures::StreamExt;
